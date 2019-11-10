@@ -73,16 +73,21 @@ def fix_nan_building_meta(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fix_nan_weather(w: pd.DataFrame) -> pd.DataFrame:
+
     # add missing datetime
     # fill nan forward and backward for each site
     dt_min, dt_max = w['timestamp'].min(), w['timestamp'].max()
     empty_df = pd.DataFrame({'timestamp': pd.date_range(start=dt_min, end=dt_max, freq='H')})
     w_tmp = pd.concat([
-        ws.merge(empty_df, on='timestamp', how='outer') \
-            .sort_values(by='timestamp') \
-            .fillna(method='bfill') \
-            .fillna(method='ffill') \
-        for site_id, ws in w.groupby('site_id')
+        ws.merge(
+            empty_df, on='timestamp', how='outer'
+        ).sort_values(
+            by='timestamp'
+        ).fillna(
+            method='bfill'
+        ).fillna(
+            method='ffill'
+        ) for site_id, ws in w.groupby('site_id')
     ], ignore_index=True)
 
     # fill nan by mean over all sites
@@ -108,7 +113,7 @@ def add_features(df_in: pd.DataFrame) -> pd.DataFrame:
     # meter
     df['meter_category'] = df['meter'].map(meters)
 
-    # categorycal
+    # categorical
     df = pd.concat([
         df,
         pd.get_dummies(df['primary_use'], drop_first=True),
