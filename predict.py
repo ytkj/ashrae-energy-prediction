@@ -25,6 +25,6 @@ def predict(ds: pd.DataFrame, model) -> pd.DataFrame:
 
 
 if __name__ == '__main__':
-    model = load_model()
+    m = load_model()
     dataset_test = pd.read_csv('dataset_test.csv')
-    predict(dataset_test, model).to_csv('submission.csv', index=False)
+    predict(dataset_test, m).to_csv('submission.csv', index=False)
