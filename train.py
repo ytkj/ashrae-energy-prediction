@@ -1,3 +1,5 @@
+from typing import Dict
+
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
@@ -14,6 +16,10 @@ def rmse(y_true, y_pred) -> float:
 rmse_score = make_scorer(rmse, greater_is_better=False)
 
 
+def add_key_prefix(d: Dict, prefix: str = 'best_') -> Dict:
+    return {prefix + key: value for key, value in d.items()}
+
+
 def grid_search(ds: pd.DataFrame):
     y = np.log1p(ds['meter_reading'])
     x = ds.iloc[:, 1:].values
@@ -21,8 +27,8 @@ def grid_search(ds: pd.DataFrame):
     x_train, x_val, y_train, y_val = train_test_split(x, y, test_size=0.2)
 
     param_grid = dict(
-        n_estimators=[10, 20, 30, 40, 50],
-        max_depth=[2, 4, 6, None],
+        n_estimators=[20, 40, 60, 80, 100],
+        max_depth=[4, 8, 12, None],
         max_features=['auto', 'sqrt'],
     )
 
@@ -42,7 +48,7 @@ def grid_search(ds: pd.DataFrame):
         regressor.fit(x_train, y_train)
 
         best_model = regressor.best_estimator_
-        best_param = regressor.best_params_
+        best_param = add_key_prefix(regressor.best_params_)
         best_rmse = - regressor.best_score_
 
         joblib.dump(best_model, 'out/model.sav')
