@@ -97,35 +97,36 @@ def fix_nan_weather(w: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_features(df_in: pd.DataFrame) -> pd.DataFrame:
+    
     df = df_in.copy()
-
+    
     # timestamp
     ts = pd.to_datetime(df['timestamp'])
     df['week'] = ts.dt.week
-    df['weekend'] = ts.dt.weekday >= 5
-    df['time_period_0-6'] = (ts.dt.hour >= 0) & (ts.dt.hour < 6)
-    df['time_period_6-12'] = (ts.dt.hour >= 6) & (ts.dt.hour < 12)
-    df['time_period_12-18'] = (ts.dt.hour >= 12) & (ts.dt.hour < 18)
-
+    df['weekend'] = (ts.dt.weekday >= 5).astype(int)
+    df['time_period_0-6'] = ((ts.dt.hour >= 0) & (ts.dt.hour < 6)).astype(int)
+    df['time_period_6-12'] = ((ts.dt.hour >= 6) & (ts.dt.hour < 12)).astype(int)
+    df['time_period_12-18'] = ((ts.dt.hour >= 12) & (ts.dt.hour < 18)).astype(int)
+    
     # wind direction
     df['wind_direction_cosine'] = np.cos(np.radians(df['wind_direction']))
-
+    
     # meter
     df['meter_category'] = df['meter'].map(meters)
-
-    # categorical
+    
+    # categorycal
     df = pd.concat([
         df,
         pd.get_dummies(df['primary_use'], drop_first=True),
         pd.get_dummies(df['meter_category'], drop_first=True)
     ], axis=1)
-
+    
     # drop columns
     df = df.drop(columns=[
         'building_id', 'meter', 'timestamp', 'site_id', 'primary_use',
         'meter_category', 'wind_direction'
     ])
-
+    
     return df
 
 
@@ -134,19 +135,19 @@ if __name__ == '__main__':
     train = pd.read_csv('data/train.csv', parse_dates=['timestamp'])
     building_metadata = pd.read_csv('data/building_metadata.csv')
     weather_train = pd.read_csv('data/weather_train.csv', parse_dates=['timestamp'])
-    train \
+    dataset_train = train \
         .pipe(join_building_meta, metadata=building_metadata.pipe(fix_nan_building_meta)) \
         .pipe(join_weather, weather=weather_train.pipe(fix_nan_weather)) \
-        .pipe(add_features) \
-        .to_csv('dataset_train.csv', index=False)
+        .pipe(add_features)
+    np.save('dataset_train.npy', dataset_train.values, allow_pickle=False)
 
     del train
     del weather_train
 
     test = pd.read_csv('data/test.csv', parse_dates=['timestamp'])
     weather_test = pd.read_csv('data/weather_test.csv', parse_dates=['timestamp'])
-    test \
+    dataset_test = test \
         .pipe(join_building_meta, metadata=building_metadata.pipe(fix_nan_building_meta)) \
         .pipe(join_weather, weather=weather_test.pipe(fix_nan_weather)) \
-        .pipe(add_features) \
-        .to_csv('dataset_test.csv', index=False)
+        .pipe(add_features)
+    np.save('dataset_test.npy', dataset_test.values, allow_pickle=False)

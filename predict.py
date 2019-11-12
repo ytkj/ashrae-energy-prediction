@@ -14,17 +14,17 @@ def load_model(run_id: str = None):
     return joblib.load(model_path)
 
 
-def predict(ds: pd.DataFrame, model) -> pd.DataFrame:
-    x = ds.iloc[:, 1:]
+def predict(ds: np.ndarray, model) -> pd.DataFrame:
+    x = ds[:, 1:]
     y_log1p = model.predict(x)
     y = np.expm1(y_log1p)
     return pd.DataFrame({
-        'row_id': ds['row_id'],
+        'row_id': ds[:, 0],
         'meter_reading': y,
     })
 
 
 if __name__ == '__main__':
-    m = load_model()
-    dataset_test = pd.read_csv('dataset_test.csv')
+    m = load_model('a04bd1e7c0c74a78aae6607882acffc8')
+    dataset_test = np.load('dataset_test.npy')
     predict(dataset_test, m).to_csv('submission.csv', index=False)
