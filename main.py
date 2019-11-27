@@ -95,64 +95,7 @@ def sample(*args, frac: float = 0.01) -> np.ndarray:
     else:
         return gen
 
-
-def fix_nan_weather(w: pd.DataFrame) -> pd.DataFrame:
     
-    # add missing datetime
-    dt_min, dt_max = w['timestamp'].min(), w['timestamp'].max()
-    empty_df = pd.DataFrame({'timestamp': pd.date_range(start=dt_min, end=dt_max, freq='H')})
-    w_out = pd.concat([
-        ws.merge(
-            empty_df, on='timestamp', how='outer'
-        ).sort_values(
-            by='timestamp'
-        ).assign(
-            site_id=site_id
-        ) for site_id, ws in w.groupby('site_id')
-    ], ignore_index=True)
-    
-    # large missing rate columns; fill by -999
-    w_out['cloud_coverage'] = w_out['cloud_coverage'].fillna(-999).astype(np.int16)
-
-    # small missing rate columns; fill by same value forward and backward
-    w_out = pd.concat([
-        ws.fillna(method='ffill').fillna(method='bfill') for _, ws in w_out.groupby('site_id')
-    ], ignore_index=True)
-        
-    # fill nan by mean over all sites
-    w_mean = w_out.groupby('timestamp').mean().drop(columns=['site_id']).reset_index()
-    w_mean = w_out.loc[:, ['site_id', 'timestamp']].merge(w_mean, on='timestamp', how='left')
-    w_out = w_out.where(~w_out.isnull(), w_mean)
-    
-    # float -> uint
-    w_out['site_id'] = w_out['site_id'].astype(np.uint8)
-    
-    return w_out
-
-
-def weather_weighted_average(w: pd.DataFrame, hours: int = 5, past: bool = True):
-    
-    if past:
-        fill_method = 'bfill'
-        sign = 1
-    else:
-        fill_method = 'ffill'
-        sign = -1
-
-    def shift_by(wdf: pd.DataFrame, n: int, method: str) -> pd.DataFrame:
-        return pd.concat([
-            ws.iloc[:, [2, 4, 8]].shift(n).fillna(method=method) for _, ws in wdf.groupby('site_id')
-        ], axis=0)
-        
-    w_weighted_average = sum(
-        [shift_by(w, (i+1)*sign, fill_method) * (hours-i) for i in range(hours)]
-    ) / (np.arange(hours) + 1).sum()
-    
-    w_weighted_average.columns = ['{0}_wa{1}'.format(c, sign*hours) for c in w_weighted_average.columns]
-    
-    return pd.concat([w, w_weighted_average], axis=1)
-
-
 class BaseTransformer(BaseEstimator, TransformerMixin):
     
     def fit(self, x: pd.DataFrame, y = None):
@@ -190,14 +133,169 @@ class ColumnTransformer(BaseTransformer):
 
 class WrappedLabelEncoder(BaseTransformer):
     
-    def __init__(self, x: pd.Series):
-        self.encoder = LabelEncoder().fit(x.values)
+    def __init__(self):
+        self.le = LabelEncoder()
+    
+    def fit(self, x, y = None):
+        self.le.fit(x)
+        return self
+
+    def transform(self, x):
+        return self.le.transform(x)
+    
+    
+class WeatherImputer(BaseTransformer):
+    
+    def transform(self, w: pd.DataFrame) -> pd.DataFrame:
+        
+        # add missing datetime
+        dt_min, dt_max = w['timestamp'].min(), w['timestamp'].max()
+        empty_df = pd.DataFrame({'timestamp': pd.date_range(start=dt_min, end=dt_max, freq='H')})
+        w_out = pd.concat([
+            ws.merge(
+                empty_df, on='timestamp', how='outer'
+            ).sort_values(
+                by='timestamp'
+            ).assign(
+                site_id=site_id
+            ) for site_id, ws in w.groupby('site_id')
+        ], ignore_index=True)
+
+        # large missing rate columns; fill by -999
+        w_out['cloud_coverage'] = w_out['cloud_coverage'].fillna(-999).astype(np.int16)
+
+        # small missing rate columns; fill by same value forward and backward
+        w_out = pd.concat([
+            ws.fillna(method='ffill').fillna(method='bfill') for _, ws in w_out.groupby('site_id')
+        ], ignore_index=True)
+
+        # fill nan by mean over all sites
+        w_mean = w_out.groupby('timestamp').mean().drop(columns=['site_id']).reset_index()
+        w_mean = w_out.loc[:, ['site_id', 'timestamp']].merge(w_mean, on='timestamp', how='left')
+        w_out = w_out.where(~w_out.isnull(), w_mean)
+
+        # float -> uint
+        w_out['site_id'] = w_out['site_id'].astype(np.uint8)
+
+        return w_out
+
+
+class WeatherEngineerer(BaseTransformer):
+    
+    @staticmethod
+    def shift_by(wdf: pd.DataFrame, n: int) -> pd.DataFrame:
+        method = 'bfill' if n > 0 else 'ffill'
+        return pd.concat([
+            ws.iloc[:, [2, 4, 8]].shift(n).fillna(method=method) for _, ws in wdf.groupby('site_id')
+        ], axis=0)
+    
+    def weather_weighted_average(self, w: pd.DataFrame, hours: int = 5) -> pd.DataFrame:
+        ahours = abs(hours)
+        sign = int(hours / ahours)
+        w_weighted_average = sum(
+            [self.shift_by(w, (i+1)*sign) * (ahours-i) for i in range(ahours)]
+        ) / (np.arange(ahours) + 1).sum()
+
+        w_weighted_average.columns = ['{0}_wa{1}'.format(c, hours) for c in w_weighted_average.columns]
+
+        return pd.concat([w, w_weighted_average], axis=1)
+    
+    @staticmethod
+    def dwdt(df: pd.DataFrame, base_col: str) -> pd.DataFrame:
+        df_out = df.copy()
+        df_out[base_col + '_dt_wa1'] = df[base_col] - df[base_col + '_wa1']
+        df_out[base_col + '_dt_wa-1'] = df[base_col] - df[base_col + '_wa-1']
+        df_out[base_col + '_dt_wa5'] = df[base_col] - df[base_col + '_wa5']
+        df_out[base_col + '_dt_wa-5'] = df[base_col] - df[base_col + '_wa-5']
+        return df_out
+    
+    @staticmethod
+    def wet(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
+        df_out = df.copy()
+        df_out['wet' + suffix] = df['air_temperature' + suffix] - df['dew_temperature' + suffix]
+        return df_out
+    
+    def transform(self, w_in: pd.DataFrame) -> pd.DataFrame:
+        w = w_in.pipe(self.weather_weighted_average, hours=1) \
+            .pipe(self.weather_weighted_average, hours=-1) \
+            .pipe(self.weather_weighted_average) \
+            .pipe(self.weather_weighted_average, hours=-5)
+
+        w = w.pipe(self.dwdt, base_col='air_temperature') \
+            .pipe(self.dwdt, base_col='dew_temperature') \
+            .pipe(self.dwdt, base_col='wind_speed') \
+            .pipe(self.wet, suffix='') \
+            .pipe(self.wet, suffix='_wa1') \
+            .pipe(self.wet, suffix='_wa-1') \
+            .pipe(self.wet, suffix='_wa5') \
+            .pipe(self.wet, suffix='_wa-5')
+
+        return w
+
+
+
+class WindDirectionEncoder(BaseTransformer):
+    
+    @staticmethod
+    def _from_degree(degree: int) -> int:
+        val = int((degree / 22.5) + 0.5)
+        arr = [i for i in range(0,16)]
+        return arr[(val % 16)]
     
     def transform(self, x: pd.Series) -> pd.Series:
-        return self.encoder.transform(x)
+        return x.apply(self._from_degree)
+
+
+class WindSpeedEncoder(BaseTransformer):
     
-    def fit_transform(self, x: pd.Series, y: np.ndarray = None) -> pd.Series:
-        return self.transform(x)
+    def transform(self, x: pd.Series) -> pd.Series:
+        return pd.cut(
+            x,
+            bins=[0, 0.3, 1.6, 3.4, 5.5, 8, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 33, 1000],
+            right=False, labels=False,
+        )
+
+    
+weather_pipeline = Pipeline(steps=[
+    ('impute_missing_value', WeatherImputer()),
+    ('feature_engineering', WeatherEngineerer()),
+    ('label_encode', ColumnTransformer({
+        'wind_direction': WindDirectionEncoder(),
+        'wind_speed': WindSpeedEncoder(),
+        'wind_speed_wa1': WindSpeedEncoder(),
+        'wind_speed_wa-1': WindSpeedEncoder(),    
+        'wind_speed_wa5': WindSpeedEncoder(),
+        'wind_speed_wa-5': WindSpeedEncoder(),    
+    }))
+])
+
+
+class BuildingMetadataEngineerer(BaseTransformer):
+    
+    def transform(self, bm_in: pd.DataFrame) -> pd.DataFrame:
+        bm = bm_in.copy()
+        bm['log_square_feet'] = np.log(bm['square_feet'])
+        bm['square_feet_per_floor'] = bm['square_feet'] / bm['floor_count']
+        bm['log_square_feet_per_floor'] = bm['log_square_feet'] / bm['floor_count']
+        bm['building_age'] = 2019 - bm['year_built']
+        bm['square_feet_per_age'] = bm['square_feet'] / bm['building_age']
+        bm['log_square_feet_per_age'] = bm['log_square_feet'] / bm['building_age']
+        return bm
+
+
+class BuildingMetadataImputer(BaseTransformer):
+    
+    def transform(self, bm: pd.DataFrame) -> pd.DataFrame:
+        return bm.fillna(-999)
+
+
+building_metadata_pipeline = Pipeline(steps=[
+    ('label_encode', ColumnTransformer({
+        'primary_use': WrappedLabelEncoder(),
+    })),
+    ('feature_engineering', BuildingMetadataEngineerer()),
+    ('impute_missing_value', BuildingMetadataImputer()),
+])
 
 
 class BuildingMetaJoiner(BaseTransformer):
@@ -231,43 +329,6 @@ class WeatherJoiner(BaseTransformer):
                 how='left',
             )
 
-    
-class ConstantImputer(BaseTransformer):
-    
-    def __init__(self, constant: Any):
-        self.constant = constant
-    
-    def transform(self, x: pd.Series) -> pd.Series:
-        return x.fillna(self.constant)
-
-
-class MeanImputer(BaseTransformer):
-    
-    def transform(self, x: pd.Series) -> pd.Series:
-        return x.fillna(x.mean())
-
-
-class WindDirectionEncoder(BaseTransformer):
-    
-    @staticmethod
-    def _from_degree(degree: int) -> int:
-        val = int((degree / 22.5) + 0.5)
-        arr = [i for i in range(0,16)]
-        return arr[(val % 16)]
-    
-    def transform(self, x: pd.Series) -> pd.Series:
-        return x.apply(self._from_degree)
-
-
-class WindSpeedEncoder(BaseTransformer):
-    
-    def transform(self, x: pd.Series) -> pd.Series:
-        return pd.cut(
-            x,
-            bins=[0, 0.3, 1.6, 3.4, 5.5, 8, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 33, 1000],
-            right=False, labels=False,
-        )
-
 
 class DatetimeFeatureEngineerer(BaseTransformer):
     
@@ -297,21 +358,6 @@ class DatetimeFeatureEngineerer(BaseTransformer):
         ]
         xp['is_holiday'] = (ts.dt.date.astype('str').isin(holidays)).astype(np.int8)
         return xp
-
-class WeatherFeatureEngineerer(BaseTransformer):
-    
-    def transform(self, x: pd.DataFrame) -> pd.DataFrame:
-        xp = x.copy()
-        xp['temperature_diff'] = x['air_temperature'] - x['dew_temperature']
-        xp['temperature_diff_wa5'] = x['air_temperature_wa5'] - x['dew_temperature_wa5']
-        xp['temperature_diff_wa-5'] = x['air_temperature_wa-5'] - x['dew_temperature_wa-5']
-        return xp
-
-
-class LogarithmTransformer(BaseTransformer):
-    
-    def transform(self, x: pd.Series) -> pd.Series:
-        return np.log(x)
 
 
 class TargetEncoder(BaseTransformer):
@@ -359,42 +405,23 @@ class ArrayTransformer(BaseTransformer):
     def transform(self, x: pd.DataFrame, y = None) -> np.ndarray:
         return x.values
 
-    
+
 def pipeline_factory() -> Pipeline:
     return Pipeline(steps=[
 
         # join
-        ('join_building_meta', BuildingMetaJoiner(building_metadata)),
+        ('join_building_meta', BuildingMetaJoiner(
+            building_metadata_pipeline.fit_transform(
+                building_metadata
+            )
+        )),
         ('join_weather', WeatherJoiner(
-            pd.concat([
-                weather_train,
-                weather_test
-            ], axis=0).pipe(
-                fix_nan_weather
-            ).pipe(
-                weather_weighted_average
-            ).pipe(
-                weather_weighted_average, past=False
+            weather_pipeline.fit_transform(
+                pd.concat([weather_train, weather_test], axis=0, ignore_index=True)
             )
         )),
 
-        # missing value
-        ('impute_fix_values', ColumnTransformer({
-            'year_built': ConstantImputer(-999),
-            'floor_count': ConstantImputer(-999),
-        })),
-
         # feature engineering
-        ('label_encode', ColumnTransformer({
-            'wind_direction': WindDirectionEncoder(),
-            'wind_speed': WindSpeedEncoder(),
-            'wind_speed_wa5': WindSpeedEncoder(),
-            'wind_speed_wa-5': WindSpeedEncoder(),
-            'primary_use': WrappedLabelEncoder(building_metadata['primary_use']),
-        })),
-        ('transform_logarithm', ColumnTransformer({
-            'square_feet': LogarithmTransformer(),
-        })),
         ('feature_engineering_from_datetime', DatetimeFeatureEngineerer()),
         ('target_encode', ColumnTransformer({
             'primary_use': TargetEncoder(),
@@ -403,10 +430,11 @@ def pipeline_factory() -> Pipeline:
             'time_period': TargetEncoder(),
             'wind_direction': TargetEncoder(),
             'wind_speed': TargetEncoder(),
+            'wind_speed_wa1': TargetEncoder(),
+            'wind_speed_wa-1': TargetEncoder(),
             'wind_speed_wa5': TargetEncoder(),
             'wind_speed_wa-5': TargetEncoder(),
         })),
-        ('diff_temperature', WeatherFeatureEngineerer()),
 
         # drop columns
         ('drop_columns', ColumnDropper([
@@ -459,7 +487,7 @@ def cv(pipeline: Pipeline, df: pd.DataFrame, n_jobs: int = -1, **params) -> Tupl
         ))
         return rmse_val, rmse_train
 
-    
+
 def oneshot(pipeline: Pipeline, df: pd.DataFrame, **params):
     
     x = df.drop(columns='meter_reading')
@@ -473,7 +501,7 @@ def oneshot(pipeline: Pipeline, df: pd.DataFrame, **params):
     )
     merged_params = {**default_params, **params}
 
-    pipeline_params = {**merged_params, 'n_jobs': -1}
+    pipeline_params = {**merged_params, 'n_jobs': -1, 'verbose': 2}
     pipeline_params = add_key_prefix(pipeline_params, 'regressor__')
     pipeline.set_params(**pipeline_params)
 
@@ -542,13 +570,13 @@ def grid_search(pipeline: Pipeline, df: pd.DataFrame, n_jobs: int = -1, **param_
         mlflow.end_run()
         return cv_results
 
-
+    
 def load_model(run_id: str = None):
     if run_id is None:
-        model_path = 'out/model.sav'
+        model_path = 'out/model.joblib'
     else:
         mlflow_client = mlflow.tracking.MlflowClient()
-        model_path = mlflow_client.download_artifacts(run_id, 'model.sav')
+        model_path = mlflow_client.download_artifacts(run_id, 'model.joblib')
 
     return joblib.load(model_path)
 
@@ -570,3 +598,6 @@ if __name__ == '__main__':
 
     test = pd.read_csv('data/test.csv', parse_dates=['timestamp']).pipe(reduce_mem_usage)
     weather_test = pd.read_csv('data/weather_test.csv', parse_dates=['timestamp'])
+
+    p = load_model()
+    predict(test, p).to_csv('submission.csv', index=False)
